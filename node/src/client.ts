@@ -287,7 +287,7 @@ export class SproutClient {
   async createPost(
     profileIds: string[],
     text: string,
-    groupId?: string,
+    groupId?: number,
     scheduledAt?: string,
     mediaIds?: string[],
     mediaTypes?: string[],
@@ -299,8 +299,8 @@ export class SproutClient {
       text: text,
     };
 
-    if (groupId) {
-      body.group_id = groupId;
+    if (groupId !== undefined && groupId !== null) {
+      body.group_id = Number(groupId);
     }
     if (scheduledAt) {
       body.delivery = {
