@@ -274,7 +274,7 @@ class SproutClient:
         self,
         profile_ids: list[str],
         text: str,
-        group_id: Optional[str] = None,
+        group_id: Optional[int] = None,
         scheduled_at: Optional[str] = None,
         media_ids: Optional[list[str]] = None,
         media_types: Optional[list[str]] = None,
@@ -285,8 +285,8 @@ class SproutClient:
             "customer_profile_ids": profile_ids,
             "text": text,
         }
-        if group_id:
-            body["group_id"] = group_id
+        if group_id is not None:
+            body["group_id"] = int(group_id)
         if scheduled_at:
             body["delivery"] = {
                 "scheduled_times": [scheduled_at],

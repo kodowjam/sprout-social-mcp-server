@@ -83,7 +83,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => {
               description: "The post text content",
             },
             group_id: {
-              type: "string",
+              type: "number",
               description: "Group ID (from list_profiles)",
             },
             scheduled_at: {
@@ -255,7 +255,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         } = args as {
           profile_ids: string[];
           text: string;
-          group_id?: string;
+          group_id?: number;
           scheduled_at?: string;
           media_ids?: string[];
           media_types?: string[];

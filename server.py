@@ -37,7 +37,7 @@ async def list_profiles() -> dict:
 async def create_post(
     profile_ids: list[str],
     text: str,
-    group_id: Optional[str] = None,
+    group_id: Optional[int] = None,
     scheduled_at: Optional[str] = None,
     media_ids: Optional[list[str]] = None,
     media_types: Optional[list[str]] = None,
