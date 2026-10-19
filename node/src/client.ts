@@ -9,7 +9,9 @@ import {
   MAX_FILE_SIZE,
   extractGdriveFileId,
   detectMediaType,
+  isPdfBytes,
 } from "./media-utils.js";
+import { MESSAGES_PAGE_SIZE } from "./listening.js";
 
 const MAX_RETRIES = 3;
 const RATE_LIMIT_PER_MINUTE = 60;
@@ -200,9 +202,7 @@ export class SproutClient {
 
   private async requestMultipart(
     path: string,
-    fileData: Buffer,
-    contentType: string,
-    filename: string
+    buildForm: () => FormData
   ): Promise<ApiResponse> {
     const url = new URL(path, this.baseUrl);
 
@@ -212,12 +212,7 @@ export class SproutClient {
     for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
       await this.throttle();
 
-      const formData = new FormData();
-      formData.append(
-        "media",
-        new Blob([new Uint8Array(fileData)], { type: contentType }),
-        filename
-      );
+      const formData = buildForm();
 
       const response = await fetch(url.toString(), {
         method: "POST",
@@ -350,7 +345,16 @@ export class SproutClient {
         return { error: err.message };
       }
 
-      const mediaType = detectMediaType(contentType, filename);
+      const mediaType = detectMediaType(
+        contentType,
+        filename,
+        fileData.subarray(0, 8)
+      );
+      // Drive sometimes serves PDFs as application/octet-stream; Sprout needs
+      // a known content type to accept the upload.
+      if (mediaType === "DOCUMENT") {
+        contentType = "application/pdf";
+      }
       if (!filename) {
         const extMap: Record<string, string> = {
           "image/jpeg": ".jpg",
@@ -363,16 +367,24 @@ export class SproutClient {
           "video/x-msvideo": ".avi",
           "video/webm": ".webm",
           "video/mpeg": ".mpeg",
+          "application/pdf": ".pdf",
         };
         const ext = extMap[contentType] || ".bin";
         filename = `media${ext}`;
       }
 
+      const uploadName = filename;
       const result = await this.requestMultipart(
         `/v1/${this.customerId}/media/`,
-        fileData,
-        contentType,
-        filename
+        () => {
+          const form = new FormData();
+          form.append(
+            "media",
+            new Blob([new Uint8Array(fileData)], { type: contentType }),
+            uploadName
+          );
+          return form;
+        }
       );
       if (!("error" in result)) {
         result._detected_media_type = mediaType;
@@ -380,11 +392,81 @@ export class SproutClient {
       return result;
     }
 
-    return await this.request({
-      method: "POST",
-      path: `/v1/${this.customerId}/media/`,
-      json: { url },
-    });
+    const probe = await this.probeUrl(url);
+    if (probe?.size && probe.size > MAX_FILE_SIZE) {
+      return {
+        error: `File exceeds ${MAX_FILE_SIZE / (1024 * 1024)}MB size limit (${Math.floor(probe.size / (1024 * 1024))}MB). Files of 50MB or more aren't supported yet.`,
+      };
+    }
+
+    // Sprout downloads the file itself from a multipart media_url part.
+    const result = await this.requestMultipart(
+      `/v1/${this.customerId}/media/`,
+      () => {
+        const form = new FormData();
+        form.append("media_url", url);
+        return form;
+      }
+    );
+    if (probe && !("error" in result)) {
+      result._detected_media_type = probe.mediaType;
+    }
+    return result;
+  }
+
+  /**
+   * Fetch the first bytes of a public URL to detect its media type and size.
+   * Returns null if the URL can't be probed; the upload still goes ahead.
+   */
+  private async probeUrl(
+    url: string
+  ): Promise<{ mediaType: string; size: number | null } | null> {
+    try {
+      const response = await fetch(url, {
+        headers: { Range: "bytes=0-1023" },
+        redirect: "follow",
+        signal: AbortSignal.timeout(15000),
+      });
+      if (!response.ok) {
+        await response.body?.cancel();
+        return null;
+      }
+
+      const contentType = response.headers.get("content-type");
+      let size: number | null = null;
+      const range = response.headers.get("content-range"); // bytes 0-1023/12345
+      const rangeMatch = range?.match(/\/(\d+)$/);
+      if (rangeMatch) {
+        size = parseInt(rangeMatch[1]);
+      } else if (response.status === 200) {
+        const length = response.headers.get("content-length");
+        size = length ? parseInt(length) : null;
+      }
+
+      let head: Uint8Array | null = null;
+      const reader = response.body?.getReader();
+      if (reader) {
+        const { value } = await reader.read();
+        head = value ?? null;
+        await reader.cancel();
+      }
+
+      let filename: string | null = null;
+      const disposition = response.headers.get("content-disposition") || "";
+      const fnMatch = disposition.match(/filename="?([^";]+)"?/);
+      if (fnMatch) {
+        filename = fnMatch[1].trim();
+      } else {
+        filename = new URL(response.url || url).pathname;
+      }
+
+      return {
+        mediaType: detectMediaType(contentType, filename, head),
+        size,
+      };
+    } catch {
+      return null;
+    }
   }
 
   async listTags(): Promise<ApiResponse> {
@@ -483,5 +565,86 @@ export class SproutClient {
       data: allData,
       paging: { total_pages: page, total_results: allData.length },
     };
+  }
+
+  // --- Tier 4: Listening ---
+
+  async listListeningTopics(): Promise<ApiResponse> {
+    return await this.request({
+      method: "GET",
+      path: `/v1/${this.customerId}/metadata/customer/topics`,
+    });
+  }
+
+  async getTopicMessages(
+    topicId: string,
+    body: {
+      filters: string[];
+      fields: string[];
+      metrics: string[];
+      sort: string[];
+      timezone: string;
+    },
+    maxResults: number
+  ): Promise<ApiResponse> {
+    // Auto-paginate until maxResults or the last page. Each page is one
+    // request, so the client's 60 req/min throttle applies.
+    const limit = Math.min(MESSAGES_PAGE_SIZE, maxResults);
+    const allData: any[] = [];
+    let page = 1;
+    let totalPages = 1;
+
+    while (true) {
+      const result = await this.request({
+        method: "POST",
+        path: `/v1/${this.customerId}/listening/topics/${topicId}/messages`,
+        json: { ...body, limit, page },
+      });
+
+      if ("error" in result) {
+        return result;
+      }
+
+      const data = result.data || [];
+      allData.push(...data);
+
+      const paging = result.paging || {};
+      totalPages = paging.total_pages ?? totalPages;
+      const currentPage = paging.current_page ?? page;
+      if (
+        allData.length >= maxResults ||
+        currentPage >= totalPages ||
+        data.length === 0
+      ) {
+        break;
+      }
+      page++;
+    }
+
+    return {
+      data: allData.slice(0, maxResults),
+      paging: {
+        pages_fetched: page,
+        total_pages: totalPages,
+        returned: Math.min(allData.length, maxResults),
+        more_available: allData.length > maxResults || page < totalPages,
+      },
+    };
+  }
+
+  async getTopicMetrics(
+    topicId: string,
+    body: {
+      filters: string[];
+      metrics: string[];
+      dimensions?: string[];
+      timezone: string;
+    }
+  ): Promise<ApiResponse> {
+    return await this.request({
+      method: "POST",
+      path: `/v1/${this.customerId}/listening/topics/${topicId}/metrics`,
+      json: body,
+    });
   }
 }

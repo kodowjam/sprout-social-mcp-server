@@ -28,6 +28,12 @@ const VIDEO_CONTENT_TYPES = new Set([
   "video/x-matroska",
 ]);
 
+const DOCUMENT_CONTENT_TYPES = new Set(["application/pdf"]);
+
+const DOCUMENT_EXTENSIONS = new Set([".pdf"]);
+
+const PDF_MAGIC = "%PDF";
+
 const IMAGE_EXTENSIONS = new Set([
   ".jpg",
   ".jpeg",
@@ -68,21 +74,38 @@ export function extractGdriveFileId(url: string): string | null {
 }
 
 /**
- * Detect whether media is PHOTO or VIDEO based on content-type or filename.
- * Returns "PHOTO" or "VIDEO". Defaults to "PHOTO" if indeterminate.
+ * Check whether the leading bytes of a file are the %PDF magic bytes.
+ */
+export function isPdfBytes(head: Uint8Array | null | undefined): boolean {
+  if (!head || head.length < PDF_MAGIC.length) return false;
+  for (let i = 0; i < PDF_MAGIC.length; i++) {
+    if (head[i] !== PDF_MAGIC.charCodeAt(i)) return false;
+  }
+  return true;
+}
+
+/**
+ * Detect whether media is PHOTO, VIDEO or DOCUMENT (PDF) based on the file's
+ * leading bytes, content-type or filename.
+ * Returns "PHOTO", "VIDEO" or "DOCUMENT". Defaults to "PHOTO" if indeterminate.
  */
 export function detectMediaType(
   contentType: string | null,
-  filename: string | null
+  filename: string | null,
+  head?: Uint8Array | null
 ): string {
+  if (isPdfBytes(head)) return "DOCUMENT";
+
   if (contentType) {
     const ct = contentType.split(";")[0].trim().toLowerCase();
+    if (DOCUMENT_CONTENT_TYPES.has(ct)) return "DOCUMENT";
     if (VIDEO_CONTENT_TYPES.has(ct)) return "VIDEO";
     if (IMAGE_CONTENT_TYPES.has(ct)) return "PHOTO";
   }
 
   if (filename) {
     const ext = getExtension(filename);
+    if (DOCUMENT_EXTENSIONS.has(ext)) return "DOCUMENT";
     if (VIDEO_EXTENSIONS.has(ext)) return "VIDEO";
     if (IMAGE_EXTENSIONS.has(ext)) return "PHOTO";
   }

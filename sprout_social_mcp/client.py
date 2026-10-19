@@ -7,6 +7,7 @@ and proactive rate limiting (60 req/min).
 
 import asyncio
 import re
+from urllib.parse import urlparse
 import time
 from collections import deque
 from typing import Any, Optional
@@ -19,6 +20,7 @@ from .media_utils import (
     extract_gdrive_file_id,
     detect_media_type,
 )
+from .listening import MESSAGES_PAGE_SIZE
 
 MAX_RETRIES = 3
 RATE_LIMIT_PER_MINUTE = 60
@@ -207,11 +209,9 @@ class SproutClient:
     async def _request_multipart(
         self,
         path: str,
-        file_data: bytes,
-        content_type: str,
-        filename: str,
+        files: dict[str, tuple],
     ) -> dict[str, Any]:
-        """Upload a file via multipart/form-data with retry + backoff."""
+        """Send a multipart/form-data request with retry + backoff."""
         url = f"{self.base_url}{path}"
 
         last_status = 0
@@ -226,7 +226,7 @@ class SproutClient:
             ) as upload_client:
                 response = await upload_client.post(
                     url,
-                    files={"media": (filename, file_data, content_type)},
+                    files=files,
                 )
 
             if response.status_code in (200, 201):
@@ -324,7 +324,11 @@ class SproutClient:
             except (ValueError, PermissionError) as exc:
                 return {"error": str(exc)}
 
-            media_type = detect_media_type(content_type, filename)
+            media_type = detect_media_type(content_type, filename, file_data[:8])
+            # Drive sometimes serves PDFs as application/octet-stream; Sprout
+            # needs a known content type to accept the upload.
+            if media_type == "DOCUMENT":
+                content_type = "application/pdf"
             if not filename:
                 ext_map = {
                     "image/jpeg": ".jpg",
@@ -337,25 +341,82 @@ class SproutClient:
                     "video/x-msvideo": ".avi",
                     "video/webm": ".webm",
                     "video/mpeg": ".mpeg",
+                    "application/pdf": ".pdf",
                 }
                 ext = ext_map.get(content_type, ".bin")
                 filename = f"media{ext}"
 
             result = await self._request_multipart(
                 f"/v1/{self.customer_id}/media/",
-                file_data,
-                content_type,
-                filename,
+                {"media": (filename, file_data, content_type)},
             )
             if "error" not in result:
                 result["_detected_media_type"] = media_type
             return result
 
-        return await self._request(
-            "POST",
+        probe = await self._probe_url(url)
+        if probe and probe["size"] and probe["size"] > MAX_FILE_SIZE:
+            return {
+                "error": (
+                    f"File exceeds {MAX_FILE_SIZE // (1024 * 1024)}MB size limit "
+                    f"({probe['size'] // (1024 * 1024)}MB). Files of 50MB or more "
+                    "aren't supported yet."
+                )
+            }
+
+        # Sprout downloads the file itself from a multipart media_url part.
+        result = await self._request_multipart(
             f"/v1/{self.customer_id}/media/",
-            json={"url": url},
+            {"media_url": (None, url)},
         )
+        if probe and "error" not in result:
+            result["_detected_media_type"] = probe["media_type"]
+        return result
+
+    async def _probe_url(self, url: str) -> Optional[dict]:
+        """Fetch the first bytes of a public URL to detect its media type and
+        size. Returns None if the URL can't be probed; the upload still goes ahead."""
+        try:
+            async with httpx.AsyncClient(
+                timeout=15.0, follow_redirects=True
+            ) as probe_client:
+                async with probe_client.stream(
+                    "GET", url, headers={"Range": "bytes=0-1023"}
+                ) as response:
+                    if response.status_code >= 400:
+                        return None
+
+                    size = None
+                    content_range = response.headers.get("content-range", "")
+                    range_match = re.search(r"/(\d+)$", content_range)
+                    if range_match:
+                        size = int(range_match.group(1))
+                    elif response.status_code == 200:
+                        length = response.headers.get("content-length")
+                        size = int(length) if length else None
+
+                    head = b""
+                    async for chunk in response.aiter_bytes():
+                        head += chunk
+                        if len(head) >= 8:
+                            break
+
+                    disposition = response.headers.get("content-disposition", "")
+                    fn_match = re.search(r'filename="?([^";]+)"?', disposition)
+                    filename = (
+                        fn_match.group(1).strip()
+                        if fn_match
+                        else urlparse(str(response.url)).path
+                    )
+
+                    return {
+                        "media_type": detect_media_type(
+                            response.headers.get("content-type"), filename, head
+                        ),
+                        "size": size,
+                    }
+        except (httpx.HTTPError, ValueError):
+            return None
 
     async def list_tags(self) -> dict:
         return await self._request(
@@ -441,3 +502,60 @@ class SproutClient:
             "data": all_data,
             "paging": {"total_pages": page, "total_results": len(all_data)},
         }
+
+    # --- Tier 4: Listening ---
+
+    async def list_listening_topics(self) -> dict:
+        return await self._request(
+            "GET", f"/v1/{self.customer_id}/metadata/customer/topics"
+        )
+
+    async def get_topic_messages(
+        self, topic_id: str, body: dict, max_results: int
+    ) -> dict:
+        # Auto-paginate until max_results or the last page. Each page is one
+        # request, so the client's 60 req/min throttle applies.
+        limit = min(MESSAGES_PAGE_SIZE, max_results)
+        all_data: list[dict] = []
+        page = 1
+        total_pages = 1
+
+        while True:
+            result = await self._request(
+                "POST",
+                f"/v1/{self.customer_id}/listening/topics/{topic_id}/messages",
+                json={**body, "limit": limit, "page": page},
+            )
+            if "error" in result:
+                return result
+
+            data = result.get("data", [])
+            all_data.extend(data)
+
+            paging = result.get("paging", {})
+            total_pages = paging.get("total_pages", total_pages)
+            current_page = paging.get("current_page", page)
+            if (
+                len(all_data) >= max_results
+                or current_page >= total_pages
+                or not data
+            ):
+                break
+            page += 1
+
+        return {
+            "data": all_data[:max_results],
+            "paging": {
+                "pages_fetched": page,
+                "total_pages": total_pages,
+                "returned": min(len(all_data), max_results),
+                "more_available": len(all_data) > max_results or page < total_pages,
+            },
+        }
+
+    async def get_topic_metrics(self, topic_id: str, body: dict) -> dict:
+        return await self._request(
+            "POST",
+            f"/v1/{self.customer_id}/listening/topics/{topic_id}/metrics",
+            json=body,
+        )
