@@ -21,10 +21,16 @@ VIDEO_CONTENT_TYPES = {
     "video/mp4", "video/quicktime", "video/x-msvideo", "video/webm",
     "video/mpeg", "video/x-matroska",
 }
-SUPPORTED_CONTENT_TYPES = IMAGE_CONTENT_TYPES | VIDEO_CONTENT_TYPES
+DOCUMENT_CONTENT_TYPES = {"application/pdf"}
+SUPPORTED_CONTENT_TYPES = (
+    IMAGE_CONTENT_TYPES | VIDEO_CONTENT_TYPES | DOCUMENT_CONTENT_TYPES
+)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".avi", ".webm", ".mpeg", ".mpg", ".mkv"}
+DOCUMENT_EXTENSIONS = {".pdf"}
+
+PDF_MAGIC = b"%PDF"
 
 
 def is_google_drive_url(url: str) -> bool:
@@ -41,13 +47,28 @@ def extract_gdrive_file_id(url: str) -> Optional[str]:
     return None
 
 
-def detect_media_type(content_type: Optional[str], filename: Optional[str]) -> str:
-    """Detect whether media is PHOTO or VIDEO based on content-type or filename.
+def is_pdf_bytes(head: Optional[bytes]) -> bool:
+    """Check whether the leading bytes of a file are the %PDF magic bytes."""
+    return bool(head) and head.startswith(PDF_MAGIC)
 
-    Returns "PHOTO" or "VIDEO". Defaults to "PHOTO" if indeterminate.
+
+def detect_media_type(
+    content_type: Optional[str],
+    filename: Optional[str],
+    head: Optional[bytes] = None,
+) -> str:
+    """Detect whether media is PHOTO, VIDEO or DOCUMENT (PDF) based on the
+    file's leading bytes, content-type or filename.
+
+    Returns "PHOTO", "VIDEO" or "DOCUMENT". Defaults to "PHOTO" if indeterminate.
     """
+    if is_pdf_bytes(head):
+        return "DOCUMENT"
+
     if content_type:
         ct = content_type.split(";")[0].strip().lower()
+        if ct in DOCUMENT_CONTENT_TYPES:
+            return "DOCUMENT"
         if ct in VIDEO_CONTENT_TYPES:
             return "VIDEO"
         if ct in IMAGE_CONTENT_TYPES:
@@ -55,6 +76,8 @@ def detect_media_type(content_type: Optional[str], filename: Optional[str]) -> s
 
     if filename:
         ext = _get_extension(filename)
+        if ext in DOCUMENT_EXTENSIONS:
+            return "DOCUMENT"
         if ext in VIDEO_EXTENSIONS:
             return "VIDEO"
         if ext in IMAGE_EXTENSIONS:

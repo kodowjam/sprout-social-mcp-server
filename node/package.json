@@ -10,7 +10,8 @@
   ],
   "scripts": {
     "build": "tsc",
-    "prepare": "tsc"
+    "prepare": "tsc",
+    "test": "tsc -p tsconfig.test.json && node --test \"build-test/test/*.test.js\""
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0"

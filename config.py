@@ -14,4 +14,7 @@ load_dotenv(Path(__file__).parent / ".env")
 
 SPROUT_API_TOKEN = os.environ.get("SPROUT_API_TOKEN", "")
 SPROUT_CUSTOMER_ID = os.environ.get("SPROUT_CUSTOMER_ID", "")
+SPROUT_DEFAULT_TIMEZONE = os.environ.get(
+    "SPROUT_DEFAULT_TIMEZONE", "America/Los_Angeles"
+)
 BASE_URL = "https://api.sproutsocial.com"

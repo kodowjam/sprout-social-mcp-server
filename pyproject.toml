@@ -10,9 +10,16 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
-    "mcp[cli]>=1.26.0",
+    "mcp[cli]>=1.26.0,<2",
     "httpx>=0.28.0",
     "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+test = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "respx>=0.21",
 ]
 
 [project.scripts]
@@ -28,3 +35,7 @@ exclude = [
   "__pycache__/",
   "*.pyc",
 ]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

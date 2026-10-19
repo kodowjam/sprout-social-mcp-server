@@ -1,23 +1,28 @@
 # Sprout Social MCP Server
 
-An MCP (Model Context Protocol) server that connects Claude to the Sprout Social API for managing social media posts, profiles, and analytics.
+An MCP (Model Context Protocol) server that connects Claude to the Sprout Social API for managing social media posts, profiles, analytics, and social listening.
 
 ## Features
 
 **Core Workflow**
 - `get_customer_id` — Get your Sprout Social customer ID
 - `list_profiles` — List all connected social profiles (LinkedIn, X/Twitter, Instagram, Facebook, etc.)
-- `create_post` — Create draft posts with optional scheduling, media, and tags
+- `create_post` — Create draft posts with optional scheduling, media (photos, videos, PDF documents), and tags
 - `get_post` — Get details and status of a specific post
 
 **Media & Metadata**
-- `upload_media` — Upload images/videos via public URL
+- `upload_media` — Upload images, videos, and PDFs via public URL or Google Drive link
 - `list_tags` — List available tags for organizing posts
 - `list_users` — List all users on the account
 
 **Analytics**
 - `get_profile_analytics` — Aggregated analytics for social profiles over a date range
 - `get_post_analytics` — Per-post performance metrics over a date range
+
+**Listening**
+- `list_listening_topics` — List Listening Topics, their themes, and data availability
+- `get_topic_messages` — Messages from a Topic with sentiment and engagement, newest first
+- `get_topic_metrics` — Aggregate Topic metrics, optionally by day, sentiment, network, etc.
 
 ## Prerequisites
 
@@ -26,6 +31,7 @@ An MCP (Model Context Protocol) server that connects Claude to the Sprout Social
 - For npx: Node.js 18+ (recommended for most users)
 - For uvx: Python 3.10+
 - For clone method: Python 3.10+ and git
+- For the Listening tools: a Sprout plan with Listening, at least one Listening Topic, and Listening API access for your token. Without these, `list_listening_topics` returns an empty list with a note.
 
 ## Installation
 
@@ -147,6 +153,36 @@ Restart Claude Desktop to load the server.
 | `list_users` | List all account users | — |
 | `get_profile_analytics` | Aggregated profile metrics over a date range | `profile_ids`, `start_date`, `end_date`, `metrics` |
 | `get_post_analytics` | Per-post metrics over a date range | `profile_ids`, `start_date`, `end_date`, `metrics` |
+| `list_listening_topics` | List Listening Topics; their IDs feed the other listening tools | — |
+| `get_topic_messages` | Topic messages with sentiment, auto-paginated (default 100, max 500) | `topic_id`, `start_date`, `end_date`, `networks`, `text_match`, `sentiment`, `public_only`, `max_results` |
+| `get_topic_metrics` | Aggregate Topic metrics with optional dimensions | `topic_id`, `start_date`, `end_date`, `metrics`, `dimensions` |
+
+### PDF document posts
+
+`upload_media` detects PDFs (by MIME type or the `%PDF` file header) and returns `_detected_media_type: "DOCUMENT"`. Pass that in `create_post`'s `media_types` to create a LinkedIn document post. Sprout silently drops profiles that can't take a document, so `create_post` rejects the call and lists the incompatible profiles if any target isn't a LinkedIn company page or personal profile. Files must be under 50MB.
+
+### Listening notes
+
+- X (Twitter) data isn't available from the Listening API. Requesting `X` or `TWITTER` drops it and returns a note.
+- Reddit appears in `get_topic_metrics` but not at message level.
+- `public_only: true` excludes posts from all of your connected profiles, leaving earned and public conversation.
+- If you don't pass `networks`, all listening networks are queried (the API requires a network filter).
+
+### Optional configuration
+
+| Variable | Default | Used by |
+|----------|---------|---------|
+| `SPROUT_DEFAULT_TIMEZONE` | `America/Los_Angeles` | Date filters and day/month buckets in the listening tools |
+
+## Development
+
+```bash
+# Node
+cd node && npm ci && npm test
+
+# Python
+pip install -e '.[test]' && pytest
+```
 
 ## Getting Your API Token
 
